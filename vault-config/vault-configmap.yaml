@@ -1,0 +1,27 @@
+---
+# Vault Configuration via ConfigMap
+# This ConfigMap contains the Vault server configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-config
+  namespace: vault
+data:
+  vault-config.hcl: |
+    ui = true
+    
+    listener "tcp" {
+      address       = "0.0.0.0:8200"
+      tls_disable   = 0
+      tls_cert_file = "/vault/config/tls/tls.crt"
+      tls_key_file  = "/vault/config/tls/tls.key"
+    }
+    
+    storage "file" {
+      path = "/vault/data"
+    }
+    
+    # For HA setup, use integrated storage:
+    # storage "raft" {
+    #   path = "/vault/data"
+    # }

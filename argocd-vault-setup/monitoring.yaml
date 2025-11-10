@@ -1,0 +1,162 @@
+---
+# Monitoring and Observability Configuration
+# ServiceMonitor for Prometheus (if using Prometheus Operator)
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vault-metrics
+  namespace: vault
+  labels:
+    app.kubernetes.io/name: vault
+    prometheus: kube-prometheus
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vault
+  endpoints:
+  - port: http
+    path: /v1/sys/metrics
+    interval: 30s
+    params:
+      format:
+      - prometheus
+    scheme: https
+    tlsConfig:
+      insecureSkipVerify: true
+---
+# PrometheusRule for Vault alerting
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: vault-alerts
+  namespace: vault
+spec:
+  groups:
+  - name: vault.rules
+    interval: 30s
+    rules:
+    - alert: VaultSealed
+      expr: vault_core_unsealed == 0
+      for: 5m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Vault instance {{ $labels.instance }} is sealed"
+        description: "Vault has been sealed for more than 5 minutes"
+    
+    - alert: VaultHighResponseTime
+      expr: vault_core_handle_login_request_duration_total > 1
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Vault high response time on {{ $labels.instance }}"
+        description: "Vault login requests are taking more than 1 second"
+    
+    - alert: VaultAuthLeaseExpiry
+      expr: vault_auth_lease_duration_seconds < 3600
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Vault auth lease expiring soon on {{ $labels.instance }}"
+        description: "Auth lease will expire in less than 1 hour"
+    
+    - alert: ExternalSecretsOperatorErrors
+      expr: increase(externalsecrets_api_errors_total[5m]) > 0
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "External Secrets Operator errors detected"
+        description: "ESO has encountered errors in the last 5 minutes"
+    
+    - alert: ExternalSecretSyncFailure
+      expr: externalsecrets_status_condition{condition="Ready",status="false"} == 1
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "External Secret {{ $labels.name }} sync failed"
+        description: "ExternalSecret has failed to sync for 10 minutes"
+---
+# GrafanaDashboard for Vault (requires Grafana operator)
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: vault-dashboard
+  namespace: vault
+spec:
+  configMapRef:
+    name: vault-dashboard-json
+---
+# ConfigMap with Grafana dashboard JSON
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vault-dashboard-json
+  namespace: vault
+data:
+  vault-dashboard.json: |
+    {
+      "annotations": {
+        "list": [
+          {
+            "builtIn": 1,
+            "datasource": "Prometheus",
+            "enable": true,
+            "hide": true,
+            "iconColor": "rgba(0, 211, 255, 1)",
+            "name": "Annotations & Alerts",
+            "type": "dashboard"
+          }
+        ]
+      },
+      "description": "Vault metrics dashboard",
+      "panels": [
+        {
+          "datasource": "Prometheus",
+          "fieldConfig": {
+            "defaults": {
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            }
+          },
+          "id": 1,
+          "targets": [
+            {
+              "expr": "vault_core_unsealed",
+              "refId": "A"
+            }
+          ],
+          "title": "Vault Sealed Status",
+          "type": "stat"
+        },
+        {
+          "datasource": "Prometheus",
+          "id": 2,
+          "targets": [
+            {
+              "expr": "rate(vault_core_handle_login_request_duration_total[5m])",
+              "refId": "A"
+            }
+          ],
+          "title": "Login Request Rate",
+          "type": "graph"
+        }
+      ],
+      "title": "Vault Monitoring",
+      "version": 1
+    }

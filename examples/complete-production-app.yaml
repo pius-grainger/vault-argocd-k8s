@@ -1,0 +1,413 @@
+---
+# Complete example: Production-ready CI/CD pipeline with secret management
+# This shows integration of ArgoCD + Vault in a real CI/CD workflow
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ci-cd-system
+
+---
+# ArgoCD Repo with credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: git-repo-creds
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+type: Opaque
+stringData:
+  type: git
+  url: https://github.com/your-org/your-repo.git
+  password: your-git-token
+  username: git-user
+
+---
+# Example: Full application stack deployment
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: complete-app-stack
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://your-git-repo.com/your-app
+    path: kustomize/overlays/production
+    targetRevision: main
+    kustomize:
+      version: v5.0.0
+  
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: production
+  
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true
+    - PruneLast=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+---
+# ExternalSecret for database
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: database-credentials
+  namespace: production
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: vault-backend-cluster
+    kind: ClusterSecretStore
+  target:
+    name: database-credentials
+    creationPolicy: Owner
+    template:
+      engineVersion: v2
+      type: Opaque
+      data:
+        DATABASE_URL: "postgresql://{{ .username }}:{{ .password }}@{{ .host }}:{{ .port }}/{{ .database }}"
+        DATABASE_HOST: "{{ .host }}"
+        DATABASE_PORT: "{{ .port }}"
+        DATABASE_USER: "{{ .username }}"
+        DATABASE_PASSWORD: "{{ .password }}"
+        DATABASE_NAME: "{{ .database }}"
+  data:
+  - secretKey: host
+    remoteRef:
+      key: databases/postgres
+      property: host
+  - secretKey: port
+    remoteRef:
+      key: databases/postgres
+      property: port
+  - secretKey: username
+    remoteRef:
+      key: databases/postgres
+      property: username
+  - secretKey: password
+    remoteRef:
+      key: databases/postgres
+      property: password
+  - secretKey: database
+    remoteRef:
+      key: databases/postgres
+      property: database
+
+---
+# ExternalSecret for API keys
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: api-credentials
+  namespace: production
+spec:
+  refreshInterval: 30m
+  secretStoreRef:
+    name: vault-backend-cluster
+    kind: ClusterSecretStore
+  target:
+    name: api-credentials
+    creationPolicy: Owner
+  data:
+  - secretKey: github-token
+    remoteRef:
+      key: applications/myapp/github
+      property: token
+  - secretKey: slack-webhook
+    remoteRef:
+      key: applications/myapp/slack
+      property: webhook
+  - secretKey: sentry-dsn
+    remoteRef:
+      key: applications/myapp/sentry
+      property: dsn
+
+---
+# Example Deployment using secrets
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+  namespace: production
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+      annotations:
+        # Vault Agent Injector annotations (alternative method)
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "application"
+    spec:
+      serviceAccountName: myapp-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+      
+      containers:
+      - name: app
+        image: myapp:v1.0.0
+        imagePullPolicy: IfNotPresent
+        
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        
+        env:
+        # Database configuration from ExternalSecret
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: DATABASE_URL
+        - name: DATABASE_HOST
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: DATABASE_HOST
+        - name: DATABASE_PORT
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: DATABASE_PORT
+        - name: DATABASE_USER
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: DATABASE_USER
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: DATABASE_PASSWORD
+        - name: DATABASE_NAME
+          valueFrom:
+            secretKeyRef:
+              name: database-credentials
+              key: DATABASE_NAME
+        
+        # API credentials
+        - name: GITHUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: api-credentials
+              key: github-token
+        - name: SLACK_WEBHOOK
+          valueFrom:
+            secretKeyRef:
+              name: api-credentials
+              key: slack-webhook
+        - name: SENTRY_DSN
+          valueFrom:
+            secretKeyRef:
+              name: api-credentials
+              key: sentry-dsn
+        
+        # Standard environment variables
+        - name: APP_ENV
+          value: "production"
+        - name: LOG_LEVEL
+          value: "info"
+        
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        
+        volumeMounts:
+        - name: vault-token
+          mountPath: /vault/secrets
+      
+      volumes:
+      - name: vault-token
+        emptyDir:
+          medium: Memory
+      
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - myapp
+              topologyKey: kubernetes.io/hostname
+      
+      terminationGracePeriodSeconds: 30
+
+---
+# Service for the application
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp
+  namespace: production
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 8080
+    name: http
+  selector:
+    app: myapp
+
+---
+# HorizontalPodAutoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: myapp-hpa
+  namespace: production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: myapp
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 80
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+# ServiceAccount for the application
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: myapp-sa
+  namespace: production
+
+---
+# Role for the application
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: myapp-role
+  namespace: production
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+
+---
+# RoleBinding for the application
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: myapp-rolebinding
+  namespace: production
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: myapp-role
+subjects:
+- kind: ServiceAccount
+  name: myapp-sa
+  namespace: production
+
+---
+# NetworkPolicy for the application
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: myapp-network-policy
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      app: myapp
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  # Allow DNS
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+  # Allow Kubernetes API
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: default
+    ports:
+    - protocol: TCP
+      port: 443
+  # Allow external APIs (if needed)
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80

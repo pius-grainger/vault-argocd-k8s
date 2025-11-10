@@ -1,0 +1,54 @@
+---
+# ArgoCD Application for Vault Agent Injector
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: vault-agent-injector
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://helm.releases.hashicorp.com
+    chart: vault
+    targetRevision: "0.27.0"
+    helm:
+      releaseName: vault-agent-injector
+      values: |
+        injector:
+          enabled: true
+          replicas: 2
+          agentImage:
+            repository: "hashicorp/vault"
+            tag: "1.15.0"
+          
+          resources:
+            limits:
+              cpu: 250m
+              memory: 256Mi
+            requests:
+              cpu: 125m
+              memory: 128Mi
+          
+          # Pod security context
+          podSecurityContext:
+            runAsNonRoot: true
+            runAsUser: 100
+            fsGroup: 1000
+          
+          # Log level
+          logLevel: "info"
+          
+          # Webhook configuration
+          webhook:
+            namespaceSelector:
+              matchLabels:
+                vault-inject: enabled
+  
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: vault
+  
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: false

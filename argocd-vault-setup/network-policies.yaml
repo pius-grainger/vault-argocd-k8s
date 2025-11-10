@@ -1,0 +1,151 @@
+---
+# NetworkPolicy for vault namespace
+# Restricts ingress/egress traffic to/from Vault
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vault-network-policy
+  namespace: vault
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: vault
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow traffic from external-secrets-operator
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: external-secrets
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: external-secrets
+    ports:
+    - protocol: TCP
+      port: 8200
+  # Allow internal Vault cluster communication
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: vault
+    ports:
+    - protocol: TCP
+      port: 8201
+  # Allow traffic from applications with specific label
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          vault-inject: enabled
+    ports:
+    - protocol: TCP
+      port: 8200
+  egress:
+  # Allow DNS
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+  # Allow Kubernetes API access
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: default
+    ports:
+    - protocol: TCP
+      port: 443
+  # Internal communication
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: vault
+    ports:
+    - protocol: TCP
+      port: 8201
+---
+# NetworkPolicy for external-secrets namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: external-secrets-network-policy
+  namespace: external-secrets
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: external-secrets
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow webhook traffic
+  - from:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 10250
+  egress:
+  # Allow DNS
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+  # Allow traffic to Vault
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: vault
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: vault
+    ports:
+    - protocol: TCP
+      port: 8200
+  # Allow Kubernetes API
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 443
+---
+# NetworkPolicy to allow applications to read secrets
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: application-secret-access
+  namespace: production
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  # Allow DNS
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+  # Allow API server access
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: default
+    ports:
+    - protocol: TCP
+      port: 443
+  # Allow Vault access (if using agent injector)
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: vault
+    ports:
+    - protocol: TCP
+      port: 8200
