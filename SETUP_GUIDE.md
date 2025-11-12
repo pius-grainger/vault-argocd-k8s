@@ -159,12 +159,6 @@ kubectl apply -f argocd-apps/external-secrets-app.yaml
 kubectl apply -f argocd-vault-setup/vault-secretstore.yaml
 ```
 
-### 8. Create SecretStore
-
-```bash
-kubectl apply -f argocd-vault-setup/vault-secretstore.yaml
-```
-
 **Verify SecretStore is Ready:**
 ```bash
 kubectl get secretstore,clustersecretstore -A
@@ -551,6 +545,10 @@ vault write -field=token auth/kubernetes/login \
 
 ## Reference Links
 
+**Getting Started with Secrets:**
+- 📘 [USING_VAULT_SECRETS.md](USING_VAULT_SECRETS.md) - How to consume Vault secrets in your applications
+
+**Official Documentation:**
 - [External Secrets Operator Documentation](https://external-secrets.io/)
 - [Vault Kubernetes Auth Method](https://www.vaultproject.io/docs/auth/kubernetes)
 - [Vault Agent Injector](https://www.vaultproject.io/docs/platform/k8s/injector)

@@ -1,0 +1,148 @@
+---
+# Working Demo: Alpine container with ExternalSecrets
+# Shows how to consume secrets from Kubernetes Secrets
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-startup
+  namespace: production
+data:
+  startup.sh: |
+    #!/bin/sh
+    echo "=== Vault + External Secrets Demo ==="
+    echo ""
+    echo "Secrets loaded from Kubernetes Secrets:"
+    echo ""
+    echo "Application Secrets (from app-secrets):"
+    echo "  Username: $APP_USERNAME"
+    echo "  Password: $APP_PASSWORD"
+    echo "  API Key: $API_KEY"
+    echo ""
+    echo "Database Secrets (from postgres-credentials):"
+    echo "  Host: $POSTGRES_HOST"
+    echo "  User: $POSTGRES_USER"
+    echo "  Database: $POSTGRES_DB"
+    echo "  Port: $POSTGRES_PORT"
+    echo ""
+    echo "Application running... Press Ctrl+C to exit"
+    sleep infinity
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-app-working
+  namespace: production
+  labels:
+    app: demo-app-working
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: demo-app-working
+  strategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: demo-app-working
+      annotations:
+        description: "Alpine container consuming Kubernetes Secrets from Vault"
+    spec:
+      serviceAccountName: default
+      containers:
+      - name: app
+        image: alpine:latest
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/sh"]
+        args: ["/scripts/startup.sh"]
+        
+        # Load app secrets from ExternalSecret
+        env:
+        - name: APP_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: username
+        - name: APP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: password
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: api_key
+        
+        # Load database secrets from ExternalSecret
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: postgres-credentials
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-credentials
+              key: POSTGRES_PASSWORD
+        - name: POSTGRES_DB
+          valueFrom:
+            secretKeyRef:
+              name: postgres-credentials
+              key: POSTGRES_DB
+        - name: POSTGRES_HOST
+          valueFrom:
+            secretKeyRef:
+              name: postgres-credentials
+              key: POSTGRES_HOST
+        - name: POSTGRES_PORT
+          valueFrom:
+            secretKeyRef:
+              name: postgres-credentials
+              key: POSTGRES_PORT
+        
+        volumeMounts:
+        - name: startup-script
+          mountPath: /scripts
+        
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "10m"
+          limits:
+            memory: "64Mi"
+            cpu: "100m"
+        
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - "test -f /scripts/startup.sh"
+          initialDelaySeconds: 5
+          periodSeconds: 10
+      
+      volumes:
+      - name: startup-script
+        configMap:
+          name: app-startup
+          defaultMode: 0755
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-app-working
+  namespace: production
+  labels:
+    app: demo-app-working
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  selector:
+    app: demo-app-working
