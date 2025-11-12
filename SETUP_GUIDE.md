@@ -42,40 +42,103 @@ kubectl apply -f argocd-apps/vault-app.yaml
 
 ### 4. Initialize and Unseal Vault
 
+**Important:** Save the unseal keys and root token securely (offline storage or sealed secure system). Do NOT commit to git.
+
 ```bash
-# Initialize Vault
+# Initialize Vault (generates 5 unseal keys, requires 3 to unseal)
 kubectl exec -it vault-0 -n vault -- vault operator init \
   -key-shares=5 \
   -key-threshold=3
+```
 
-# Unseal Vault (repeat 3 times with different unseal keys)
-kubectl exec -it vault-0 -n vault -- vault operator unseal <UNSEAL_KEY>
+This outputs:
+```
+Unseal Key 1: <key1>
+Unseal Key 2: <key2>
+Unseal Key 3: <key3>
+Unseal Key 4: <key4>
+Unseal Key 5: <key5>
 
-# Verify Vault is unsealed
+Initial Root Token: hvs.<token>
+```
+
+**Save these keys and token in a secure location.**
+
+Unseal each Vault pod (vault-0, vault-1, vault-2):
+```bash
+# For vault-0 (will be leader)
+kubectl exec -it vault-0 -n vault -- vault operator unseal <UNSEAL_KEY_1>
+kubectl exec -it vault-0 -n vault -- vault operator unseal <UNSEAL_KEY_2>
+kubectl exec -it vault-0 -n vault -- vault operator unseal <UNSEAL_KEY_3>
+
+# For vault-1 (standby, after it joins the raft cluster)
+kubectl exec -it vault-1 -n vault -- vault operator raft join http://vault-0.vault-internal:8200
+kubectl exec -it vault-1 -n vault -- vault operator unseal <UNSEAL_KEY_1>
+kubectl exec -it vault-1 -n vault -- vault operator unseal <UNSEAL_KEY_2>
+kubectl exec -it vault-1 -n vault -- vault operator unseal <UNSEAL_KEY_3>
+
+# For vault-2 (standby)
+kubectl exec -it vault-2 -n vault -- vault operator raft join http://vault-0.vault-internal:8200
+kubectl exec -it vault-2 -n vault -- vault operator unseal <UNSEAL_KEY_1>
+kubectl exec -it vault-2 -n vault -- vault operator unseal <UNSEAL_KEY_2>
+kubectl exec -it vault-2 -n vault -- vault operator unseal <UNSEAL_KEY_3>
+```
+
+**Verify all pods are unsealed:**
+```bash
 kubectl exec -it vault-0 -n vault -- vault status
+kubectl exec -it vault-1 -n vault -- vault status
+kubectl exec -it vault-2 -n vault -- vault status
 ```
 
-### 5. Configure Vault
+All should show: `Sealed: false`, `Initialized: true`
 
-Port-forward to Vault:
+### 5. Configure Vault Policies and Auth
+
+Copy the setup scripts into vault-0 and execute them inside the pod (this avoids HTTPS/TLS issues):
+
 ```bash
-kubectl port-forward -n vault svc/vault 8200:8200
+# Copy scripts into the pod
+kubectl cp vault-config/setup-vault-policies.sh vault/vault-0:/tmp/ -n vault
+kubectl cp vault-config/setup-k8s-auth.sh vault/vault-0:/tmp/ -n vault
+
+# Make them executable
+kubectl exec -n vault vault-0 -- chmod +x /tmp/setup-vault-policies.sh /tmp/setup-k8s-auth.sh
+
+# Run policies setup (with root token)
+kubectl exec -n vault vault-0 -- env \
+  VAULT_ADDR='http://127.0.0.1:8200' \
+  VAULT_TOKEN='<YOUR_ROOT_TOKEN>' \
+  sh /tmp/setup-vault-policies.sh
+
+# Run Kubernetes auth setup (uses the pod's service account token)
+kubectl exec -n vault vault-0 -- env \
+  VAULT_ADDR='http://127.0.0.1:8200' \
+  VAULT_TOKEN='<YOUR_ROOT_TOKEN>' \
+  sh /tmp/setup-k8s-auth.sh
 ```
 
-In another terminal:
+**Verify setup:**
 ```bash
-export VAULT_ADDR=https://localhost:8200
-export VAULT_SKIP_VERIFY=true
-export VAULT_TOKEN=<ROOT_TOKEN>
-
-# Create policies
-bash vault-config/setup-vault-policies.sh
-
-# Configure Kubernetes auth
-bash vault-config/setup-k8s-auth.sh
+kubectl exec -n vault vault-0 -- env \
+  VAULT_ADDR='http://127.0.0.1:8200' \
+  VAULT_TOKEN='<YOUR_ROOT_TOKEN>' \
+  sh -c "vault policy list && vault read auth/kubernetes/config"
 ```
 
-### 6. Install External Secrets Operator
+### 6. Create External Secrets ServiceAccount
+
+The External Secrets Operator needs a ServiceAccount to authenticate with Vault:
+
+```bash
+kubectl apply -f argocd-vault-setup/external-secrets-serviceaccount.yaml
+```
+
+This creates:
+- `ServiceAccount`: `external-secrets-vault-auth` in the `external-secrets` namespace
+- `ClusterRoleBinding`: Allows Vault's Kubernetes auth to validate the token
+
+### 7. Install External Secrets Operator
 
 **Using Helm:**
 ```bash
@@ -90,13 +153,25 @@ helm install external-secrets external-secrets/external-secrets \
 kubectl apply -f argocd-apps/external-secrets-app.yaml
 ```
 
-### 7. Create SecretStore
+### 8. Create SecretStore
 
 ```bash
 kubectl apply -f argocd-vault-setup/vault-secretstore.yaml
 ```
 
-### 8. Deploy Example Applications
+### 8. Create SecretStore
+
+```bash
+kubectl apply -f argocd-vault-setup/vault-secretstore.yaml
+```
+
+**Verify SecretStore is Ready:**
+```bash
+kubectl get secretstore,clustersecretstore -A
+# Both should show Status: Valid, READY: True
+```
+
+### 9. Deploy Example Applications
 
 ```bash
 # Create production namespace
@@ -107,6 +182,72 @@ kubectl apply -f examples/production-app-with-secrets.yaml
 ```
 
 ## Troubleshooting
+
+### Issue: SecretStore shows "InvalidProviderConfig"
+
+**Check the error:**
+```bash
+kubectl describe secretstore vault-backend -n external-secrets
+```
+
+**Common cause:** The ServiceAccount `external-secrets-vault-auth` does not exist.
+
+**Solution:**
+```bash
+kubectl apply -f argocd-vault-setup/external-secrets-serviceaccount.yaml
+```
+
+### Issue: SecretStore shows "InvalidProviderConfig"
+
+**Check the error:**
+```bash
+kubectl describe secretstore vault-backend -n external-secrets
+```
+
+**Common cause:** The ServiceAccount `external-secrets-vault-auth` does not exist.
+
+**Solution:**
+```bash
+kubectl apply -f argocd-vault-setup/external-secrets-serviceaccount.yaml
+```
+
+### Issue: "unable to create client" or service account not found
+
+**Cause:** External Secrets cannot find the required ServiceAccount.
+
+**Solution:**
+```bash
+# Verify the ServiceAccount exists
+kubectl get sa -n external-secrets
+kubectl get sa external-secrets-vault-auth -n external-secrets
+
+# If missing, create it
+kubectl apply -f argocd-vault-setup/external-secrets-serviceaccount.yaml
+
+# Force SecretStore reconciliation
+kubectl patch secretstore vault-backend -n external-secrets \
+  -p '{"metadata":{"annotations":{"reconcile":"'$(date +%s)'"}}' --type merge
+```
+
+### Issue: Vault PVCs in Pending state
+
+**Check PVC status:**
+```bash
+kubectl get pvc -n vault
+```
+
+**Cause:** StorageClass not specified or not available.
+
+**Solution:** Ensure the Vault Helm values include `storageClass` (e.g., `gp2` for AWS):
+```yaml
+server:
+  dataStorage:
+    storageClass: gp2
+  auditStorage:
+    storageClass: gp2
+```
+
+Then reapply the ArgoCD application or redeploy via Helm.
 
 ### Issue: ExternalSecret stuck in "Pending"
 
@@ -125,7 +266,25 @@ kubectl describe externalsecret app-secrets -n production
 - Service account doesn't have proper permissions
 - Kubernetes auth role not configured correctly
 
-### Issue: Vault unseals don't persist
+### Issue: "unable to create client" or service account not found
+
+**Cause:** External Secrets cannot find the required ServiceAccount.
+
+**Solution:**
+```bash
+# Verify the ServiceAccount exists
+kubectl get sa -n external-secrets
+kubectl get sa external-secrets-vault-auth -n external-secrets
+
+# If missing, create it
+kubectl apply -f argocd-vault-setup/external-secrets-serviceaccount.yaml
+
+# Force SecretStore reconciliation
+kubectl patch secretstore vault-backend -n external-secrets \
+  -p '{"metadata":{"annotations":{"reconcile":"'$(date +%s)'"}}' --type merge
+```
+
+### Issue: Vault PVCs in Pending state
 
 **Solution:** Configure persistent storage or integrated storage (Raft):
 ```yaml
