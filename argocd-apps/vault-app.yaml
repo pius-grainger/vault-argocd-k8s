@@ -17,20 +17,47 @@ spec:
         server:
           dataStorage:
             size: 10Gi
+            enabled: true
+            storageClass: gp2
           auditStorage:
             size: 10Gi
-          ha:
             enabled: true
-            replicas: 3
-          
+            storageClass: gp2
           serviceAccount:
             create: true
             name: vault
-          
           ha:
+            enabled: true
+            replicas: 3
             raft:
               enabled: true
               setNodeId: true
+              # Provide a custom raft configuration here. This is where you
+              # can enable auto-unseal with AWS KMS. Replace <KMS_KEY_ID>
+              # and optionally the region. Use IRSA or node IAM roles in EKS
+              # instead of embedding credentials.
+              config: |
+                ui = true
+
+                listener "tcp" {
+                  tls_disable = 1
+                  address = "[::]:8200"
+                  cluster_address = "[::]:8201"
+                }
+
+                storage "raft" {
+                  path = "/vault/data"
+                }
+
+                # Example AWS KMS auto-unseal configuration. Replace <KMS_KEY_ID>
+                # and <AWS_REGION> with your values. Prefer using IRSA to provide
+                # the node with permissions to call KMS rather than mounting creds.
+                seal "awskms" {
+                  region    = "<AWS_REGION>"
+                  kms_key_id = "<KMS_KEY_ID>"
+                }
+
+                service_registration "kubernetes" {}
           
           resources:
             requests:
