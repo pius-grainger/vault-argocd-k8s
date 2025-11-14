@@ -1,7 +1,17 @@
 #!/bin/bash
 set -e
 
-VAULT_TOKEN="***REMOVED***"
+# Get Vault token from environment or secret
+if [ -z "$VAULT_TOKEN" ]; then
+  VAULT_TOKEN=$(kubectl get secret vault-unseal-keys -n vault -o jsonpath='{.data.root-token}' 2>/dev/null | base64 -d)
+fi
+
+if [ -z "$VAULT_TOKEN" ]; then
+  echo "ERROR: VAULT_TOKEN not found"
+  echo "Set it with: export VAULT_TOKEN=<your-token>"
+  exit 1
+fi
+
 TEST_NS="vault-test"
 
 echo "=== Testing Vault Setup ==="
