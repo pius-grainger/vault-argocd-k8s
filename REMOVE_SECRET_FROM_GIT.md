@@ -22,7 +22,7 @@ git push --force
 # Install: brew install bfg (macOS) or download from https://rtyley.github.io/bfg-repo-cleaner/
 
 # Replace the token in all history
-bfg --replace-text <(echo '***REMOVED***==>***REMOVED***')
+bfg --replace-text <(echo 'YOUR_EXPOSED_TOKEN==>***REMOVED***')
 
 # Clean up
 git reflog expire --expire=now --all
@@ -66,5 +66,5 @@ If you've already rotated the Vault root token, you can allow the push:
 kubectl exec -n vault vault-0 -- vault token create -policy=root
 
 # Revoke old token
-kubectl exec -n vault vault-0 -- vault token revoke ***REMOVED***
+kubectl exec -n vault vault-0 -- vault token revoke <OLD_TOKEN>
 ```
