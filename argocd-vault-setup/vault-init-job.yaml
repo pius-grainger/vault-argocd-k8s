@@ -1,0 +1,60 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vault-init
+  namespace: vault
+spec:
+  template:
+    spec:
+      serviceAccountName: vault
+      containers:
+      - name: vault-init
+        image: hashicorp/vault:1.15.2
+        env:
+        - name: VAULT_ADDR
+          value: "http://vault-0.vault-internal:8200"
+        command:
+        - /bin/sh
+        - -c
+        - |
+          # Wait for vault-0 to be ready
+          until vault status > /dev/null 2>&1; do sleep 5; done
+          
+          # Check if already initialized
+          if vault status | grep -q "Initialized.*false"; then
+            echo "Initializing Vault..."
+            vault operator init -key-shares=5 -key-threshold=3 > /tmp/init-output
+            
+            # Store keys in secret
+            kubectl create secret generic vault-unseal-keys \
+              --from-literal=key1="$(sed -n 's/Unseal Key 1: //p' /tmp/init-output)" \
+              --from-literal=key2="$(sed -n 's/Unseal Key 2: //p' /tmp/init-output)" \
+              --from-literal=key3="$(sed -n 's/Unseal Key 3: //p' /tmp/init-output)" \
+              --from-literal=key4="$(sed -n 's/Unseal Key 4: //p' /tmp/init-output)" \
+              --from-literal=key5="$(sed -n 's/Unseal Key 5: //p' /tmp/init-output)" \
+              --from-literal=root-token="$(sed -n 's/Initial Root Token: //p' /tmp/init-output)"
+          fi
+          
+          # Get unseal keys
+          KEY1=$(kubectl get secret vault-unseal-keys -o jsonpath='{.data.key1}' | base64 -d)
+          KEY2=$(kubectl get secret vault-unseal-keys -o jsonpath='{.data.key2}' | base64 -d)
+          KEY3=$(kubectl get secret vault-unseal-keys -o jsonpath='{.data.key3}' | base64 -d)
+          
+          # Unseal all pods
+          for pod in vault-0 vault-1 vault-2; do
+            echo "Processing $pod..."
+            
+            # Join cluster if not initialized
+            if kubectl exec $pod -- vault status 2>&1 | grep -q "not initialized"; then
+              kubectl exec $pod -- vault operator raft join http://vault-0.vault-internal:8200
+            fi
+            
+            # Unseal if sealed
+            if kubectl exec $pod -- vault status 2>&1 | grep -q "Sealed.*true"; then
+              kubectl exec $pod -- vault operator unseal "$KEY1"
+              kubectl exec $pod -- vault operator unseal "$KEY2"
+              kubectl exec $pod -- vault operator unseal "$KEY3"
+            fi
+          done
+      restartPolicy: OnFailure

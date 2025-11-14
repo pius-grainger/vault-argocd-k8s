@@ -42,7 +42,32 @@ kubectl apply -f argocd-apps/vault-app.yaml
 
 ### 4. Initialize and Unseal Vault
 
-**Important:** Save the unseal keys and root token securely (offline storage or sealed secure system). Do NOT commit to git.
+**Option A: Automated (Recommended)**
+
+```bash
+# Deploy the vault-init job (initializes and unseals all 3 pods)
+kubectl apply -f argocd-vault-setup/vault-init-job.yaml
+
+# Wait for job to complete
+kubectl wait --for=condition=complete job/vault-init -n vault --timeout=5m
+
+# Verify all pods are unsealed
+kubectl exec -n vault vault-0 -- vault status
+kubectl exec -n vault vault-1 -- vault status
+kubectl exec -n vault vault-2 -- vault status
+```
+
+All should show: `Sealed: false`, `Initialized: true`
+
+**Retrieve the root token:**
+```bash
+export VAULT_TOKEN=$(kubectl get secret vault-unseal-keys -n vault -o jsonpath='{.data.root-token}' | base64 -d)
+echo "Root Token: $VAULT_TOKEN"
+```
+
+**Important:** Save the root token securely. The unseal keys are stored in the `vault-unseal-keys` secret.
+
+**Option B: Manual**
 
 ```bash
 # Initialize Vault (generates 5 unseal keys, requires 3 to unseal)
@@ -51,79 +76,54 @@ kubectl exec -it vault-0 -n vault -- vault operator init \
   -key-threshold=3
 ```
 
-This outputs:
-```
-Unseal Key 1: <key1>
-Unseal Key 2: <key2>
-Unseal Key 3: <key3>
-Unseal Key 4: <key4>
-Unseal Key 5: <key5>
+This outputs unseal keys and root token. **Save these securely.**
 
-Initial Root Token: hvs.<token>
-```
-
-**Save these keys and token in a secure location.**
-
-Unseal each Vault pod (vault-0, vault-1, vault-2):
+Unseal each pod:
 ```bash
-# For vault-0 (will be leader)
-kubectl exec -it vault-0 -n vault -- vault operator unseal <UNSEAL_KEY_1>
-kubectl exec -it vault-0 -n vault -- vault operator unseal <UNSEAL_KEY_2>
-kubectl exec -it vault-0 -n vault -- vault operator unseal <UNSEAL_KEY_3>
+# vault-0
+kubectl exec -it vault-0 -n vault -- vault operator unseal <KEY_1>
+kubectl exec -it vault-0 -n vault -- vault operator unseal <KEY_2>
+kubectl exec -it vault-0 -n vault -- vault operator unseal <KEY_3>
 
-# For vault-1 (standby, after it joins the raft cluster)
+# vault-1
 kubectl exec -it vault-1 -n vault -- vault operator raft join http://vault-0.vault-internal:8200
-kubectl exec -it vault-1 -n vault -- vault operator unseal <UNSEAL_KEY_1>
-kubectl exec -it vault-1 -n vault -- vault operator unseal <UNSEAL_KEY_2>
-kubectl exec -it vault-1 -n vault -- vault operator unseal <UNSEAL_KEY_3>
+kubectl exec -it vault-1 -n vault -- vault operator unseal <KEY_1>
+kubectl exec -it vault-1 -n vault -- vault operator unseal <KEY_2>
+kubectl exec -it vault-1 -n vault -- vault operator unseal <KEY_3>
 
-# For vault-2 (standby)
+# vault-2
 kubectl exec -it vault-2 -n vault -- vault operator raft join http://vault-0.vault-internal:8200
-kubectl exec -it vault-2 -n vault -- vault operator unseal <UNSEAL_KEY_1>
-kubectl exec -it vault-2 -n vault -- vault operator unseal <UNSEAL_KEY_2>
-kubectl exec -it vault-2 -n vault -- vault operator unseal <UNSEAL_KEY_3>
+kubectl exec -it vault-2 -n vault -- vault operator unseal <KEY_1>
+kubectl exec -it vault-2 -n vault -- vault operator unseal <KEY_2>
+kubectl exec -it vault-2 -n vault -- vault operator unseal <KEY_3>
 ```
-
-**Verify all pods are unsealed:**
-```bash
-kubectl exec -it vault-0 -n vault -- vault status
-kubectl exec -it vault-1 -n vault -- vault status
-kubectl exec -it vault-2 -n vault -- vault status
-```
-
-All should show: `Sealed: false`, `Initialized: true`
 
 ### 5. Configure Vault Policies and Auth
 
-Copy the setup scripts into vault-0 and execute them inside the pod (this avoids HTTPS/TLS issues):
+**Automated Setup (Recommended):**
 
 ```bash
-# Copy scripts into the pod
-kubectl cp vault-config/setup-vault-policies.sh vault/vault-0:/tmp/ -n vault
-kubectl cp vault-config/setup-k8s-auth.sh vault/vault-0:/tmp/ -n vault
+# Set your root token
+export VAULT_TOKEN=$(kubectl get secret vault-unseal-keys -n vault -o jsonpath='{.data.root-token}' | base64 -d)
 
-# Make them executable
-kubectl exec -n vault vault-0 -- chmod +x /tmp/setup-vault-policies.sh /tmp/setup-k8s-auth.sh
-
-# Run policies setup (with root token)
-kubectl exec -n vault vault-0 -- env \
-  VAULT_ADDR='http://127.0.0.1:8200' \
-  VAULT_TOKEN='<YOUR_ROOT_TOKEN>' \
-  sh /tmp/setup-vault-policies.sh
-
-# Run Kubernetes auth setup (uses the pod's service account token)
-kubectl exec -n vault vault-0 -- env \
-  VAULT_ADDR='http://127.0.0.1:8200' \
-  VAULT_TOKEN='<YOUR_ROOT_TOKEN>' \
-  sh /tmp/setup-k8s-auth.sh
+# Run the fix script to configure Kubernetes auth
+bash vault-config/fix-vault-auth.sh
 ```
+
+This script will:
+- Enable Kubernetes auth method
+- Configure Kubernetes auth with cluster credentials
+- Create the `external-secrets` policy
+- Create the `external-secrets` role
 
 **Verify setup:**
 ```bash
-kubectl exec -n vault vault-0 -- env \
-  VAULT_ADDR='http://127.0.0.1:8200' \
-  VAULT_TOKEN='<YOUR_ROOT_TOKEN>' \
-  sh -c "vault policy list && vault read auth/kubernetes/config"
+kubectl exec -n vault vault-0 -- sh -c "
+  export VAULT_TOKEN=$VAULT_TOKEN
+  vault auth list | grep kubernetes
+  vault policy list | grep external-secrets
+  vault read auth/kubernetes/role/external-secrets
+"
 ```
 
 ### 6. Create External Secrets ServiceAccount
@@ -165,7 +165,17 @@ kubectl get secretstore,clustersecretstore -A
 # Both should show Status: Valid, READY: True
 ```
 
-### 9. Deploy Example Applications
+### 9. Test the Setup
+
+```bash
+# Run comprehensive test
+bash vault-config/test-vault-setup.sh
+
+# Or run diagnostics
+bash vault-config/diagnose-vault-auth.sh
+```
+
+### 10. Deploy Example Applications
 
 ```bash
 # Create production namespace
